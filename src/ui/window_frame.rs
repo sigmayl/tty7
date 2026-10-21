@@ -112,7 +112,9 @@ impl RenderOnce for WindowFrame {
         window.set_client_inset(SHADOW);
         let insets = frame_insets(tiling);
         let radii = corners(tiling);
-        let size = window.window_bounds().get_bounds().size;
+        // Fullscreen/maximized window bounds retain the restore size; clipping
+        // and resize hit testing need the current drawable surface instead.
+        let size = window.viewport_size();
         window.set_window_clip(Some((
             gpui::Bounds {
                 origin: point(insets.left, insets.top),
