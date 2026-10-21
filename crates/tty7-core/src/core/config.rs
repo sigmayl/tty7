@@ -218,6 +218,10 @@ pub struct Config {
     pub link_file_command: Option<String>,
     pub ssh_loopback_forward: bool,
     pub cursor_blink: bool,
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub cursor_blink_style: CursorBlinkStyle,
+    #[serde(default)]
+    pub cursor_smooth_move: bool,
     pub scrollback_limit: usize,
     #[serde(default, deserialize_with = "de_lenient")]
     pub new_tab_position: NewTabPosition,
@@ -582,6 +586,14 @@ pub enum CursorStyle {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum CursorBlinkStyle {
+    #[default]
+    Blink,
+    Breathe,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum PromptCursorStyle {
     #[default]
     Follow,
@@ -816,6 +828,8 @@ impl Default for Config {
             link_file_command: None,
             ssh_loopback_forward: true,
             cursor_blink: true,
+            cursor_blink_style: CursorBlinkStyle::Blink,
+            cursor_smooth_move: false,
             scrollback_limit: 10_000,
             new_tab_position: NewTabPosition::AfterCurrent,
             tab_bar_position: TabBarPosition::Left,
@@ -3220,6 +3234,31 @@ mod tests {
         assert!(value.get("ssh_profile_frecency").is_none());
         // The SSH preferences are settings like any other and stay put.
         assert_eq!(value["verify_host_keys"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn cursor_animation_settings_preserve_legacy_defaults_and_round_trip() {
+        let legacy: Config = serde_json::from_str(r#"{"cursor_blink":false}"#).unwrap();
+        assert!(!legacy.cursor_blink);
+        assert_eq!(legacy.cursor_blink_style, CursorBlinkStyle::Blink);
+        assert!(!legacy.cursor_smooth_move);
+
+        let configured: Config =
+            serde_json::from_str(r#"{"cursor_blink_style":"breathe","cursor_smooth_move":true}"#)
+                .unwrap();
+        let restored: Config =
+            serde_json::from_str(&serde_json::to_string(&configured).unwrap()).unwrap();
+        assert!(restored.cursor_blink);
+        assert_eq!(restored.cursor_blink_style, CursorBlinkStyle::Breathe);
+        assert!(restored.cursor_smooth_move);
+
+        let unknown: Config = serde_json::from_str(
+            r#"{"cursor_blink_style":"unknown","cursor_smooth_move":true,"scrollback_limit":1234}"#,
+        )
+        .unwrap();
+        assert_eq!(unknown.cursor_blink_style, CursorBlinkStyle::Blink);
+        assert!(unknown.cursor_smooth_move);
+        assert_eq!(unknown.scrollback_limit, 1234);
     }
 
     #[test]

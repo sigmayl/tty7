@@ -312,6 +312,20 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCursorShapeDesc => "Вид курсора терминала.",
         L10nKey::SettingsPromptCursorShape => "Курсор в приглашении",
         L10nKey::SettingsPromptCursorShapeDesc => "Курсор в приглашении оболочки.",
+        L10nKey::SettingsCursorBlinkStyle => "Режим мигания",
+        L10nKey::SettingsCursorBlinkStyleDesc => {
+            "Обычное мигание или плавная пульсация при включённом мигании курсора."
+        }
+        L10nKey::CursorBlinkStyleBlink => "Мигание",
+        L10nKey::CursorBlinkStyleBreathe => "Пульсация",
+        L10nKey::SettingsCursorSmoothMove => "Плавное движение курсора",
+        L10nKey::SettingsCursorSmoothMoveDesc => "Анимация перемещения курсора между ячейками.",
+        L10nKey::SettingsSearchCursorBlinkStyleKeywords => {
+            "курсор мигание пульсация blink breathe animation"
+        }
+        L10nKey::SettingsSearchCursorSmoothMoveKeywords => {
+            "курсор плавное движение анимация smooth movement"
+        }
         L10nKey::SettingsCursorBlink => "Мигание курсора",
         L10nKey::SettingsCursorBlinkDesc => "Мигать курсором, когда терминал в фокусе.",
         L10nKey::SettingsLanguage => "Язык",

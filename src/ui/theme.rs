@@ -580,6 +580,12 @@ fn window_appearance(
     let resolved = resolved_background_appearance(backdrop, blur);
     if cfg!(target_os = "windows") {
         windows_window_appearance(resolved, opacity)
+    } else if cfg!(any(target_os = "linux", target_os = "freebsd"))
+        && resolved == WindowBackgroundAppearance::Opaque
+    {
+        // X11 needs an alpha-capable surface for the frame's rounded corners
+        // and shadow, even when the workspace fill itself is fully opaque.
+        WindowBackgroundAppearance::Transparent
     } else {
         resolved
     }
@@ -1089,6 +1095,19 @@ fn sync_native_appearance(_dark: Option<bool>) {}
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn opaque_linux_workspaces_leave_the_window_corners_transparent() {
+        assert_eq!(
+            window_appearance(WindowBackdrop::Auto, false, 1.0),
+            WindowBackgroundAppearance::Transparent,
+        );
+        assert_eq!(
+            window_appearance(WindowBackdrop::Auto, true, 0.85),
+            resolved_background_appearance(WindowBackdrop::Auto, true),
+        );
+    }
 
     /// The lights share a line with the chrome tiles they sit beside. gpui
     /// hangs the top of the 14pt frame `y` below the window's top edge, so

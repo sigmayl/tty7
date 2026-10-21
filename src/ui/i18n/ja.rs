@@ -318,6 +318,18 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCursorShapeDesc => "ターミナルカーソルの描画方法",
         L10nKey::SettingsPromptCursorShape => "プロンプトのカーソル形状",
         L10nKey::SettingsPromptCursorShapeDesc => "シェルプロンプトでのカーソル",
+        L10nKey::SettingsCursorBlinkStyle => "点滅方式",
+        L10nKey::SettingsCursorBlinkStyleDesc => {
+            "カーソルの点滅が有効な場合、点滅または呼吸を選択します。"
+        }
+        L10nKey::CursorBlinkStyleBlink => "点滅",
+        L10nKey::CursorBlinkStyleBreathe => "呼吸",
+        L10nKey::SettingsCursorSmoothMove => "カーソルの滑らかな移動",
+        L10nKey::SettingsCursorSmoothMoveDesc => "セル間のカーソル移動を滑らかにします。",
+        L10nKey::SettingsSearchCursorBlinkStyleKeywords => {
+            "カーソル 点滅 呼吸 blink breathe animation"
+        }
+        L10nKey::SettingsSearchCursorSmoothMoveKeywords => "カーソル 滑らか 移動 smooth movement",
         L10nKey::SettingsCursorBlink => "カーソルの点滅",
         L10nKey::SettingsCursorBlinkDesc => {
             "ターミナルがフォーカスされている間、カーソルを点滅させる"

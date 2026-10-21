@@ -262,7 +262,11 @@ pub fn open_at(
             None => Tty7App::for_workspace(workspace, window, cx),
         });
         created = Some(app.clone());
-        cx.new(|cx| Root::new(app, window, cx).bg(gpui::transparent_black()))
+        cx.new(|cx| {
+            Root::new(app, window, cx)
+                .bordered(false)
+                .bg(gpui::transparent_black())
+        })
     });
 
     let handle = match opened {

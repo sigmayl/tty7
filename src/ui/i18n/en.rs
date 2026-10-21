@@ -301,8 +301,20 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsCursorShapeDesc => "How the terminal cursor is drawn.",
         L10nKey::SettingsPromptCursorShape => "Prompt cursor shape",
         L10nKey::SettingsPromptCursorShapeDesc => "The cursor at the shell prompt.",
+        L10nKey::SettingsCursorBlinkStyle => "Blink style",
+        L10nKey::SettingsCursorBlinkStyleDesc => {
+            "Choose blinking or breathing while cursor blink is enabled."
+        }
+        L10nKey::CursorBlinkStyleBlink => "Blink",
+        L10nKey::CursorBlinkStyleBreathe => "Breathe",
+        L10nKey::SettingsCursorSmoothMove => "Smooth cursor movement",
+        L10nKey::SettingsCursorSmoothMoveDesc => "Animate the cursor as it moves between cells.",
+        L10nKey::SettingsSearchCursorBlinkStyleKeywords => {
+            "cursor caret blink breathe breathing pulse animation"
+        }
+        L10nKey::SettingsSearchCursorSmoothMoveKeywords => "cursor caret smooth movement animation",
         L10nKey::SettingsCursorBlink => "Cursor blink",
-        L10nKey::SettingsCursorBlinkDesc => "Pulse the cursor while the terminal is focused.",
+        L10nKey::SettingsCursorBlinkDesc => "Animate the cursor while the terminal is focused.",
         L10nKey::SettingsLanguage => "Language",
         L10nKey::SettingsLanguageDesc => "Choose the language used for the tty7 interface.",
         L10nKey::SettingsLanguageEnglish => "English",

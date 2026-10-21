@@ -307,6 +307,8 @@ impl Tty7App {
         let cursor_style = cfg.cursor_style;
         let prompt_cursor_style = cfg.prompt_cursor_style;
         let cursor_blink = cfg.cursor_blink;
+        let cursor_blink_style = cfg.cursor_blink_style;
+        let cursor_smooth_move = cfg.cursor_smooth_move;
         let font_thicken = cfg.font_thicken;
         let font_family = cfg.font_family.clone();
         let font_bold = cfg.font_family_bold.clone();
@@ -442,6 +444,34 @@ impl Tty7App {
             this.set_cursor_blink(on, cx)
         });
 
+        let blink_style = self.settings_choice(
+            "cursor-blink-style",
+            &[
+                t(L10nKey::CursorBlinkStyleBlink),
+                t(L10nKey::CursorBlinkStyleBreathe),
+            ],
+            usize::from(cursor_blink_style == CursorBlinkStyle::Breathe),
+            cx,
+            |this, ix, _, cx| {
+                this.set_cursor_blink_style(
+                    if ix == 0 {
+                        CursorBlinkStyle::Blink
+                    } else {
+                        CursorBlinkStyle::Breathe
+                    },
+                    cx,
+                );
+            },
+        );
+        let smooth_move = self.settings_switch(
+            "cursor-smooth-move",
+            cursor_smooth_move,
+            cx,
+            |this, on, _, cx| {
+                this.set_cursor_smooth_move(on, cx);
+            },
+        );
+
         let mut groups = vec![self.render_theme_group(cx)];
         groups.extend(self.render_theme_editor_group(cx));
         groups.push(
@@ -540,6 +570,18 @@ impl Tty7App {
                         t(L10nKey::SettingsCursorBlink),
                         t(L10nKey::SettingsCursorBlinkDesc),
                         blink,
+                        cx,
+                    ),
+                    self.settings_row(
+                        t(L10nKey::SettingsCursorBlinkStyle),
+                        t(L10nKey::SettingsCursorBlinkStyleDesc),
+                        blink_style,
+                        cx,
+                    ),
+                    self.settings_row(
+                        t(L10nKey::SettingsCursorSmoothMove),
+                        t(L10nKey::SettingsCursorSmoothMoveDesc),
+                        smooth_move,
                         cx,
                     ),
                 ]

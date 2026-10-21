@@ -341,7 +341,7 @@ fn window_bounds_to_remember(window: &Window) -> Bounds<Pixels> {
 /// whole surface, shadow included — so the band starts at the padding and stops
 /// at the far edge of the frame, one padding in from each side. Anything else
 /// leaves the outermost chips outside the zone that is supposed to contain
-/// them. `window_paddings` answers `Edges::all(0)` under server-side
+/// them. `content_insets` answers `Edges::all(0)` under server-side
 /// decorations, which is every platform but Linux CSD, so off Linux this stays
 /// the full-width rectangle from the window's corner it has always been.
 fn strip_band(viewport: Size<Pixels>, pad: Edges<Pixels>) -> Bounds<Pixels> {
@@ -3805,14 +3805,30 @@ impl Tty7App {
 
     pub(crate) fn set_cursor_blink(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.cursor_blink = on);
-        if !on {
-            for tab in &self.tabs {
-                for leaf in tab.pane.terminals() {
-                    leaf.update(cx, |v, cx| {
-                        v.cursor_visible = true;
-                        cx.notify();
-                    });
-                }
+        self.reset_cursor_animation(cx);
+    }
+
+    pub(crate) fn set_cursor_blink_style(
+        &mut self,
+        style: crate::core::config::CursorBlinkStyle,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_config(cx, |cfg| cfg.cursor_blink_style = style);
+        self.reset_cursor_animation(cx);
+    }
+
+    pub(crate) fn set_cursor_smooth_move(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.cursor_smooth_move = on);
+        self.reset_cursor_animation(cx);
+    }
+
+    fn reset_cursor_animation(&mut self, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            for leaf in tab.pane.terminals() {
+                leaf.update(cx, |view, cx| {
+                    view.reset_cursor_animation();
+                    cx.notify();
+                });
             }
         }
     }
@@ -5024,7 +5040,7 @@ impl Tty7App {
         let vertical = matches!(cx.global::<Config>().tab_bar_position, TabBarPosition::Left)
             && !self.tabs.is_empty();
         let viewport = window.viewport_size();
-        let pad = gpui_component::window_paddings(window);
+        let pad = crate::ui::window_frame::content_insets(window);
         // The band each surface claims, read off the tabs it drew rather than
         // measured as an element of its own: the chips and the rows are the
         // only part of either surface a drop has anything to say about, and a
@@ -7074,6 +7090,12 @@ impl Tty7App {
                 self.set_auto_hide_titlebar_buttons(defaults.auto_hide_titlebar_buttons, cx)
             }
             L10nKey::SettingsCursorBlink => self.set_cursor_blink(defaults.cursor_blink, cx),
+            L10nKey::SettingsCursorBlinkStyle => {
+                self.set_cursor_blink_style(defaults.cursor_blink_style, cx)
+            }
+            L10nKey::SettingsCursorSmoothMove => {
+                self.set_cursor_smooth_move(defaults.cursor_smooth_move, cx)
+            }
             L10nKey::SettingsCursorShape => self.set_cursor_style(defaults.cursor_style, cx),
             L10nKey::SettingsPromptCursorShape => {
                 self.set_prompt_cursor_style(defaults.prompt_cursor_style, cx)
@@ -7335,7 +7357,11 @@ impl Tty7App {
                 });
                 let view =
                     cx.new(|cx| crate::ui::settings_window::SettingsWindow::new(&app, window, cx));
-                cx.new(|cx| gpui_component::Root::new(view, window, cx))
+                cx.new(|cx| {
+                    gpui_component::Root::new(view, window, cx)
+                        .bordered(false)
+                        .bg(gpui::transparent_black())
+                })
             });
             match opened {
                 Ok(handle) => app.update(cx, |this, _| {
@@ -9775,7 +9801,6 @@ impl Render for Tty7App {
                 .size_full()
                 .flex()
                 .flex_col()
-                .bg(window_bg)
                 .text_color(cx.theme().foreground)
                 .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
                 .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
@@ -10256,7 +10281,7 @@ impl Render for Tty7App {
         if let Some(start) = prof {
             crate::ui::perf::record("window", start.elapsed());
         }
-        root
+        crate::ui::window_frame::WindowFrame::new(window_bg).child(root)
     }
 }
 
@@ -12617,6 +12642,30 @@ mod cursor_blink_gpui_tests {
     use crate::terminal::view::quiet_test_pane;
     use crate::ui::pane::{Pane, PaneSlot};
     use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn cursor_animation_options_save_and_reset_independently(cx: &mut TestAppContext) {
+        use crate::core::config::CursorBlinkStyle;
+        use crate::ui::i18n::L10nKey;
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.set_cursor_blink_style(CursorBlinkStyle::Breathe, cx);
+            app.set_cursor_smooth_move(true, cx);
+            assert_eq!(
+                cx.global::<Config>().cursor_blink_style,
+                CursorBlinkStyle::Breathe
+            );
+            assert!(cx.global::<Config>().cursor_smooth_move);
+            app.reset_settings_value(L10nKey::SettingsCursorBlinkStyle, window, cx);
+            assert_eq!(
+                cx.global::<Config>().cursor_blink_style,
+                CursorBlinkStyle::Blink
+            );
+            assert!(cx.global::<Config>().cursor_smooth_move);
+            app.reset_settings_value(L10nKey::SettingsCursorSmoothMove, window, cx);
+            assert!(!cx.global::<Config>().cursor_smooth_move);
+        });
+    }
 
     #[gpui::test]
     fn only_the_focused_pane_advances_its_blink_phase(cx: &mut TestAppContext) {

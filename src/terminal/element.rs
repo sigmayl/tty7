@@ -16,7 +16,7 @@ use gpui::{
 };
 use gpui_component::ActiveTheme as _;
 
-use super::view::{TerminalView, should_show_context_menu};
+use super::view::{CursorLayout, TerminalView, should_show_context_menu};
 use crate::core::config::Config;
 
 mod osc8_underline;
@@ -1651,23 +1651,23 @@ pub(super) struct GridCursor {
 fn paint_cursor(
     window: &mut Window,
     geom: &CellGeom,
-    cursor: Option<(usize, usize, crate::core::config::CursorStyle)>,
+    cursor: Option<(Bounds<Pixels>, crate::core::config::CursorStyle)>,
     focused: bool,
-    cursor_visible: bool,
+    opacity: f32,
     caret: Hsla,
 ) {
     use crate::core::config::CursorStyle;
-    let Some((row, col, style)) = cursor else {
+    let Some((rect, style)) = cursor else {
         return;
     };
-    let rect = geom.cell_rect(row, col, 1);
     if !focused {
         window.paint_quad(outline(rect, caret, BorderStyle::Solid));
         return;
     }
-    if !cursor_visible {
+    if opacity <= 0. {
         return;
     }
+    let caret = caret.opacity(opacity);
     match style {
         // A focused block is drawn as reverse video by `invert_cursor_cell`
         // before the glyphs go down, so the caret is opaque and the character
@@ -1808,6 +1808,7 @@ pub(super) struct GridSnapshot {
     /// anchor_row - history_size + display_offset.
     display_offset: i32,
     history_size: usize,
+    alternate: bool,
 }
 
 impl GridSnapshot {
@@ -1853,6 +1854,7 @@ impl TerminalElement {
         let mut any_selected = false;
         let display_offset;
         let history_size;
+        let alternate;
         let prompt_shape = self.prompt_cursor_shape(cx);
         {
             let mut palette = self.view.read(cx).terminal.palette;
@@ -1955,6 +1957,7 @@ impl TerminalElement {
                 sliver = Some(row_buf);
             }
 
+            alternate = term.mode().contains(TermMode::ALT_SCREEN);
             let row = cursor_row;
             let col = cur.point.column.0;
             if row >= 0 && (row as usize) < rows && col < cols {
@@ -1989,6 +1992,7 @@ impl TerminalElement {
             any_current,
             display_offset,
             history_size,
+            alternate,
         })
     }
 
@@ -2324,7 +2328,10 @@ impl Element for TerminalElement {
         let bold_font = self.view.read(cx).font_bold.clone();
         let italic_font = self.view.read(cx).font_italic.clone();
         let focused = self.view.read(cx).focus_handle.is_focused(window);
-        let cursor_visible = self.view.read(cx).cursor_visible;
+        let cfg = cx.global::<Config>();
+        let animated_cursor = cfg.cursor_smooth_move
+            || (cfg.cursor_blink
+                && cfg.cursor_blink_style == crate::core::config::CursorBlinkStyle::Breathe);
         let bell_flash = self.view.read(cx).bell_flash;
         let editor_active = self.view.read(cx).input_active();
         // The pane leaf stores its per-frame dim here (see `TerminalView::dim`).
@@ -2381,13 +2388,56 @@ impl Element for TerminalElement {
         let cursor_cell = cursor.map(|c| (c.row, c.ime_col));
         let render_cursor = snap.painted_cursor();
 
-        // Reverse-video the block cursor's cell up front, so it rides the
-        // normal background-then-glyph path instead of being tinted on top of
-        // the finished frame. `paint_cursor` skips the focused block for the
-        // same reason.
-        if !editor_active
+        let cursor_rect = render_cursor.map(|(row, col, style)| {
+            let col = if style == crate::core::config::CursorStyle::Block
+                && buf.get(row * geom.cols + col).is_some_and(|c| c.spacer)
+            {
+                col.saturating_sub(1)
+            } else {
+                col
+            };
+            let span = if style == crate::core::config::CursorStyle::Block
+                && col + 1 < geom.cols
+                && buf.get(row * geom.cols + col + 1).is_some_and(|c| c.spacer)
+            {
+                2
+            } else {
+                1
+            };
+            (geom.cell_rect(row, col, span), style)
+        });
+        let (cursor_position, cursor_opacity) = if !editor_active {
+            self.view.update(cx, |view, cx| {
+                view.cursor_frame(
+                    cursor_rect.map(|(rect, _)| rect.origin - geom.origin),
+                    CursorLayout::Grid {
+                        cols: geom.cols,
+                        rows: geom.rows,
+                        cell_size: [geom.cell_width.as_f32(), geom.line_height.as_f32()],
+                        scroll_offset: snap.display_offset,
+                        scroll_fraction: frac,
+                        input_shift,
+                        alternate: snap.alternate,
+                    },
+                    focused,
+                    window,
+                    cx,
+                )
+            })
+        } else {
+            (point(px(0.), px(0.)), 1.)
+        };
+        let painted_cursor = cursor_rect.map(|(mut rect, style)| {
+            rect.origin = geom.origin + cursor_position;
+            (rect, style)
+        });
+
+        // The ordinary blink keeps the fast reverse-video path. An animated
+        // block is composited through a moving clip after the grid is painted.
+        if !animated_cursor
+            && !editor_active
             && focused
-            && cursor_visible
+            && cursor_opacity > 0.
             && let Some((row, col, crate::core::config::CursorStyle::Block)) = render_cursor
         {
             invert_cursor_cell(&mut buf, geom.cols, row, col, &colors);
@@ -2559,11 +2609,68 @@ impl Element for TerminalElement {
                 paint_cursor(
                     window,
                     &geom,
-                    render_cursor,
+                    painted_cursor,
                     focused,
-                    cursor_visible,
+                    cursor_opacity,
                     colors.caret,
                 );
+                if animated_cursor
+                    && focused
+                    && cursor_opacity > 0.
+                    && let Some((rect, crate::core::config::CursorStyle::Block)) = painted_cursor
+                {
+                    // Redraw only the rows touched by the moving block. The
+                    // glyphs stay at their grid positions beneath its clip.
+                    let ink = crate::ui::presets::caret_ink(
+                        colors.caret,
+                        colors.default_bg,
+                        colors.default_fg,
+                    );
+                    window.with_content_mask(Some(ContentMask { bounds: rect }), |window| {
+                        for row in 0..geom.rows {
+                            let row_rect = geom.cell_rect(row, 0, geom.cols);
+                            if row_rect.bottom() <= rect.top() || row_rect.top() >= rect.bottom() {
+                                continue;
+                            }
+                            let mut cells = buf[row * geom.cols..(row + 1) * geom.cols].to_vec();
+                            for cell in &mut cells {
+                                let mut bg = cell.bg;
+                                if cell.selected {
+                                    bg = bg.blend(colors.selection_bg);
+                                }
+                                if cell.match_hit && !cell.match_current {
+                                    bg = bg.blend(colors.match_bg);
+                                }
+                                if cell.match_current {
+                                    bg = bg.blend(colors.current_match_bg);
+                                }
+                                cell.bg = bg.blend(colors.caret.opacity(cursor_opacity));
+                                cell.draw_bg = true;
+                                cell.fg = cell.fg.blend(ink.opacity(cursor_opacity));
+                                if let Some(under) = cell.underline_color.as_mut() {
+                                    *under = under.blend(ink.opacity(cursor_opacity * under.a));
+                                }
+                            }
+                            let row_geom = CellGeom {
+                                origin: row_rect.origin,
+                                rows: 1,
+                                ..geom
+                            };
+                            paint_backgrounds(window, &row_geom, &cells);
+                            paint_glyphs(
+                                window,
+                                cx,
+                                &row_geom,
+                                &cells,
+                                font_size,
+                                &base_font,
+                                bold_font.as_ref(),
+                                italic_font.as_ref(),
+                            );
+                            paint_special_underlines(window, &row_geom, &cells, scale);
+                        }
+                    });
+                }
                 paint_marked(
                     window,
                     cx,

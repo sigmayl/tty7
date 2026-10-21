@@ -102,9 +102,8 @@ impl Render for SettingsWindow {
             }
             page
         });
-        gpui::div()
+        let content = gpui::div()
             .size_full()
-            .bg(crate::ui::theme::overlay_background(cx))
             .text_color(cx.theme().foreground)
             // ⌘W closes this window the way it closes a tab in a workspace.
             .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| this.close(window, cx)))
@@ -115,6 +114,8 @@ impl Render for SettingsWindow {
             // toasts it is asked to draw: without this, everything the page
             // reports — an ssh_config import, a passphrase it could not store
             // — was pushed into a layer nobody rendered.
-            .children(gpui_component::Root::render_notification_layer(window, cx))
+            .children(gpui_component::Root::render_notification_layer(window, cx));
+        crate::ui::window_frame::WindowFrame::new(crate::ui::theme::overlay_background(cx))
+            .child(content)
     }
 }

@@ -30,7 +30,7 @@ use crate::core::actions::{
     OpenLinkUnderPointer, OpenLinkWithDefaultApp, RevealLinkUnderPointer, SaveAgentLaunchArgs,
     SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
 };
-use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier};
+use crate::core::config::{BellMode, Config, CursorBlinkStyle, LinkFileOpen, MouseZoomModifier};
 use crate::core::shell_quote::quote_for_shell;
 use crate::daemon::protocol::{RemoteContext, ShellSpec};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
@@ -63,6 +63,27 @@ fn input_caret_paint(
         CursorStyle::Block => InputCaretPaint::Block,
         CursorStyle::Underline => InputCaretPaint::Underline,
     })
+}
+
+/// Geometry changes snap the caret instead of animating across unrelated grids.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum CursorLayout {
+    Grid {
+        cols: usize,
+        rows: usize,
+        cell_size: [f32; 2],
+        scroll_offset: i32,
+        scroll_fraction: f32,
+        input_shift: usize,
+        alternate: bool,
+    },
+    Prompt {
+        cols: usize,
+        row: usize,
+        cell_size: [f32; 2],
+        scroll_shift: usize,
+        start: (usize, usize),
+    },
 }
 
 /// Which panes are on screen right now, readable without touching the entity
@@ -418,6 +439,10 @@ pub struct TerminalView {
     pub(super) scroll_handle: TerminalScrollHandle,
     pub search: Option<SearchState>,
     pub cursor_visible: bool,
+    cursor_breathe_start: std::time::Instant,
+    cursor_motion: super::cursor_animation::CursorMotion,
+    cursor_layout: Option<CursorLayout>,
+    cursor_animation_pending: bool,
     pub(super) search_focused: bool,
     /// The message box docked under an agent, once it has been asked for —
     /// see [`super::composer`].
@@ -1763,7 +1788,7 @@ impl TerminalView {
 
         let focus_subs = vec![
             cx.on_focus_in(&focus_handle, window, |view, _window, cx| {
-                view.cursor_visible = true;
+                view.reset_cursor_animation();
                 if view.keep_unread_on_focus {
                     view.keep_unread_on_focus = false;
                 } else {
@@ -1774,6 +1799,7 @@ impl TerminalView {
                 cx.notify();
             }),
             cx.on_blur(&focus_handle, window, |view, _window, cx| {
+                view.cursor_motion.reset();
                 view.report_focus_change(false);
                 cx.notify();
             }),
@@ -1793,11 +1819,14 @@ impl TerminalView {
                         // which pane the reader is on. The window's handle is
                         // authoritative here, just as it is in the paint path.
                         if view.focus_handle.is_focused(window) {
-                            if cx.global::<Config>().cursor_blink {
+                            if cx.global::<Config>().cursor_blink
+                                && cx.global::<Config>().cursor_blink_style
+                                    == CursorBlinkStyle::Blink
+                            {
                                 view.cursor_visible = !view.cursor_visible;
                                 cx.notify();
                             } else if !view.cursor_visible {
-                                view.cursor_visible = true;
+                                view.reset_cursor_blink();
                                 cx.notify();
                             }
                         }
@@ -1909,6 +1938,10 @@ impl TerminalView {
             scroll_handle: TerminalScrollHandle::default(),
             search: None,
             cursor_visible: true,
+            cursor_breathe_start: std::time::Instant::now(),
+            cursor_motion: Default::default(),
+            cursor_layout: None,
+            cursor_animation_pending: false,
             dim: 1.,
             search_focused: false,
             composer: None,
@@ -2757,7 +2790,7 @@ impl TerminalView {
                     });
                 }
             }
-            self.cursor_visible = true;
+            self.reset_cursor_blink();
             self.jump_to_prompt();
             cx.notify();
             cx.stop_propagation();
@@ -2836,7 +2869,7 @@ impl TerminalView {
                         self.cmd.delete_to_start();
                     }
                     self.close_completion();
-                    self.cursor_visible = true;
+                    self.reset_cursor_blink();
                     cx.notify();
                 } else if cfg!(target_os = "macos") && self.accepts_input(cx) {
                     self.send_shortcut_bytes(&[0x15], "u", cx);
@@ -2849,7 +2882,7 @@ impl TerminalView {
                         self.cmd.delete_to_end();
                     }
                     self.close_completion();
-                    self.cursor_visible = true;
+                    self.reset_cursor_blink();
                     cx.notify();
                 } else if cfg!(target_os = "macos") && self.accepts_input(cx) {
                     self.send_shortcut_bytes(&[0x0b], "k", cx);
@@ -2863,7 +2896,7 @@ impl TerminalView {
     fn handle_editor_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
         let m = &ks.modifiers;
         let key = ks.key.as_str();
-        self.cursor_visible = true;
+        self.reset_cursor_blink();
         self.jump_to_prompt();
         self.adopt_typeahead();
 
@@ -2925,7 +2958,7 @@ impl TerminalView {
                 (false, "backspace") if self.cmd.selection().is_none() && !self.cmd.is_empty() => {
                     self.cmd.backspace();
                     self.completion_refilter();
-                    self.cursor_visible = true;
+                    self.reset_cursor_blink();
                     cx.notify();
                     return;
                 }
@@ -2982,7 +3015,7 @@ impl TerminalView {
             if cfg!(not(target_os = "macos")) && key == "a" {
                 self.cmd.select_all();
                 self.close_completion();
-                self.cursor_visible = true;
+                self.reset_cursor_blink();
                 cx.notify();
                 return;
             }
@@ -3362,7 +3395,7 @@ impl TerminalView {
             return;
         }
         self.terminal.write(bytes.to_vec());
-        self.cursor_visible = true;
+        self.reset_cursor_blink();
         self.jump_to_prompt();
         cx.notify();
     }
@@ -3409,7 +3442,7 @@ impl TerminalView {
             self.history_nav = None;
             self.editor_goal_col = None;
             self.close_completion();
-            self.cursor_visible = true;
+            self.reset_cursor_blink();
             cx.notify();
             return;
         }
@@ -3675,7 +3708,7 @@ impl TerminalView {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             self.cmd.delete_selection();
             self.close_completion();
-            self.cursor_visible = true;
+            self.reset_cursor_blink();
             cx.notify();
         }
         true
@@ -4795,7 +4828,7 @@ impl TerminalView {
         self.editor_select_gesture = true;
         self.editor_goal_col = None;
         self.close_completion();
-        self.cursor_visible = true;
+        self.reset_cursor_blink();
         cx.notify();
         true
     }
@@ -4814,7 +4847,7 @@ impl TerminalView {
         } else {
             self.cmd.extend_to(idx);
         }
-        self.cursor_visible = true;
+        self.reset_cursor_blink();
         cx.notify();
         true
     }
@@ -5081,7 +5114,7 @@ impl TerminalView {
         }
         self.jump_to_prompt();
         self.close_completion();
-        self.cursor_visible = true;
+        self.reset_cursor_blink();
         self.cmd.insert_str("\n");
         self.history_nav = None;
         self.editor_goal_col = None;
@@ -5179,7 +5212,7 @@ impl TerminalView {
         let pasted = self.cmd.pasted();
         self.terminal.write(submit_bytes(&line, bracketed, pasted));
         self.cmd.clear();
-        self.cursor_visible = true;
+        self.reset_cursor_blink();
         self.jump_to_prompt();
         cx.notify();
     }
@@ -5574,7 +5607,7 @@ impl TerminalView {
         if !has_pending && cands.len() == 1 {
             let c = cands[0].clone();
             self.completion_insert(&c, c.start);
-            self.cursor_visible = true;
+            self.reset_cursor_blink();
             cx.notify();
             return None;
         }
@@ -5593,7 +5626,7 @@ impl TerminalView {
             self.apply_candidate(line, word_start, word_end, &lcp);
         }
         let generation = self.open_completion(s);
-        self.cursor_visible = true;
+        self.reset_cursor_blink();
         cx.notify();
         Some(generation)
     }
@@ -5816,7 +5849,7 @@ impl TerminalView {
                 }
                 if quote_for_shell(&lcp, shell.as_deref()) == lcp {
                     self.apply_candidate(&line, word_start, cursor, &lcp);
-                    self.cursor_visible = true;
+                    self.reset_cursor_blink();
                     cx.notify();
                     return;
                 }
@@ -5828,7 +5861,7 @@ impl TerminalView {
     fn completion_select(&mut self, forward: bool, cx: &mut Context<Self>) {
         if let Some(s) = self.completion.as_mut() {
             s.select(forward);
-            self.cursor_visible = true;
+            self.reset_cursor_blink();
             cx.notify();
         }
     }
@@ -5840,7 +5873,7 @@ impl TerminalView {
         if let Some(c) = s.selected().cloned() {
             self.completion_insert(&c, s.word_start);
         }
-        self.cursor_visible = true;
+        self.reset_cursor_blink();
         cx.notify();
     }
 
@@ -5910,7 +5943,7 @@ impl TerminalView {
         self.jump_to_prompt();
         if let Some(rs) = self.reverse_search.as_mut() {
             rs.push_query(text, &self.history, &self.history_frecency);
-            self.cursor_visible = true;
+            self.reset_cursor_blink();
             cx.notify();
             return;
         }
@@ -5921,12 +5954,12 @@ impl TerminalView {
             self.editor_goal_col = None;
             self.last_word_nav = None;
             self.completion_refilter();
-            self.cursor_visible = true;
+            self.reset_cursor_blink();
             cx.notify();
             return;
         }
         self.write_gap_text(text, text.as_bytes().to_vec(), false, cx);
-        self.cursor_visible = true;
+        self.reset_cursor_blink();
         cx.notify();
     }
 
@@ -7020,13 +7053,91 @@ impl TerminalView {
         );
     }
 
-    fn render_input_bar(&self, focused: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn reset_cursor_blink(&mut self) {
+        self.cursor_visible = true;
+        self.cursor_breathe_start = std::time::Instant::now();
+    }
+
+    pub(crate) fn reset_cursor_animation(&mut self) {
+        self.reset_cursor_blink();
+        self.cursor_motion.reset();
+        self.cursor_layout = None;
+    }
+
+    /// Sample one visible caret and request another presented frame only while
+    /// it is moving or breathing. Hidden panes never enter this callback chain.
+    pub(super) fn cursor_frame(
+        &mut self,
+        target: Option<gpui::Point<Pixels>>,
+        layout: CursorLayout,
+        focused: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (gpui::Point<Pixels>, f32) {
+        let Some(target) = target else {
+            self.cursor_motion.reset();
+            self.cursor_layout = None;
+            return (gpui::point(px(0.), px(0.)), 1.);
+        };
+        if self.cursor_layout != Some(layout) || !focused {
+            self.cursor_motion.reset();
+            self.cursor_layout = Some(layout);
+        }
+        let cfg = cx.global::<Config>();
+        let active = focused && window.is_window_active();
+        let now = std::time::Instant::now();
+        let (position, moving) = self.cursor_motion.sample(
+            [target.x.as_f32(), target.y.as_f32()],
+            cfg.cursor_smooth_move && active,
+            now,
+        );
+        let breathing =
+            active && cfg.cursor_blink && cfg.cursor_blink_style == CursorBlinkStyle::Breathe;
+        let opacity = if breathing {
+            super::cursor_animation::breathe_opacity(now.duration_since(self.cursor_breathe_start))
+        } else if !focused
+            || !cfg.cursor_blink
+            || cfg.cursor_blink_style == CursorBlinkStyle::Breathe
+            || self.cursor_visible
+        {
+            1.
+        } else {
+            0.
+        };
+        if (moving || breathing) && !self.cursor_animation_pending {
+            self.cursor_animation_pending = true;
+            let view = cx.weak_entity();
+            window.on_next_frame(move |window, cx| {
+                let Some(view) = view.upgrade() else {
+                    return;
+                };
+                view.update(cx, |view, cx| {
+                    view.cursor_animation_pending = false;
+                    if view.focus_handle.is_focused(window)
+                        && window.is_window_active()
+                        && view.displayed.load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        cx.notify();
+                    }
+                });
+            });
+        }
+        (gpui::point(px(position[0]), px(position[1])), opacity)
+    }
+
+    fn render_input_bar(
+        &mut self,
+        focused: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let (crow, ccol) = self.cursor_cell().unwrap_or((0, 0));
         let cx_left = px(GRID_PAD_X) + self.cell_width * (ccol as f32);
         let shift = self.input_scroll_rows();
         let cy_top = px(GRID_PAD_Y) + self.line_height * (crow as f32 - shift as f32);
 
         if let Some(rs) = &self.reverse_search {
+            self.cursor_motion.reset();
             let label = format!("(reverse-i-search)`{}': ", rs.query());
             let matched = one_line(rs.selected_line(&self.history).unwrap_or_default());
             return div()
@@ -7063,197 +7174,204 @@ impl TerminalView {
         let marked = self.marked_text.clone();
         let has_marked = !marked.is_empty();
         let selection = self.cmd.selection();
-
-        let theme = cx.theme();
-        let fg = theme.foreground;
-        let caret_col = theme.caret;
-        let muted = theme.muted_foreground;
-        let mut sel_bg = theme.selection;
+        let fg = cx.theme().foreground;
+        let caret_col = cx.theme().caret;
+        let muted = cx.theme().muted_foreground;
+        let bg = cx.theme().background;
+        let mut sel_bg = cx.theme().selection;
         sel_bg.a = 0.55;
         let cell_w = self.cell_width;
         let lh = self.line_height;
         let caret_h = px((self.font_size.as_f32() * 1.2).min(lh.as_f32()));
         let caret_top = px((lh.as_f32() - caret_h.as_f32()) / 2.0);
+        let cols = self.terminal.term.lock().columns().max(1);
+        let start = input_start(ccol, cols);
 
         let line: String = chars.iter().collect();
         let mut colors: Vec<gpui::Hsla> = Vec::with_capacity(len);
         for span in highlight::highlight(&line) {
-            let c = self.kind_color(span.kind, cx);
-            for _ in span.text.chars() {
-                colors.push(c);
-            }
+            let color = self.kind_color(span.kind, cx);
+            colors.extend(std::iter::repeat_n(color, span.text.chars().count()));
         }
-
-        // This caret only exists at a prompt, so the prompt's own shape wins.
         let cursor_style = {
             let cfg = cx.global::<Config>();
             cfg.prompt_cursor_style.shape().unwrap_or(cfg.cursor_style)
         };
-        let cursor_paint = input_caret_paint(focused, self.cursor_visible, cursor_style);
-        let cursor_on = cursor_paint.is_some();
-        let block_cursor = cursor_paint == Some(InputCaretPaint::Block);
-        // A block caret is drawn as reverse video on the cell it covers, not as
-        // a translucent tint over it — the way every other terminal draws one,
-        // and the only way the caret keeps the contrast the theme gave it.
-        let caret_ink = crate::ui::presets::caret_ink(caret_col, theme.background, fg);
-        let caret_bar = move || {
-            let base = div().absolute().left_0();
-            match cursor_paint.expect("caret is only rendered when it has a paint style") {
-                // An inactive terminal keeps a steady hollow block, independent
-                // of the configured focused-caret shape and current blink phase.
-                InputCaretPaint::Outline => base
-                    .top(px(0.))
-                    .w_full()
-                    .h(lh)
-                    .border_1()
-                    .border_color(caret_col),
-                InputCaretPaint::Block => base.top(px(0.)).w_full().h(lh).bg(caret_col),
-                InputCaretPaint::Bar => base.top(caret_top).w(px(1.5)).h(caret_h).bg(caret_col),
-                InputCaretPaint::Underline => {
-                    let uh = px(2.);
-                    base.top(lh - uh).w_full().h(uh).bg(caret_col)
-                }
-            }
-        };
-        let cell = |color: gpui::Hsla,
-                    text: String,
-                    width: usize,
-                    selected: bool,
-                    caret: bool,
-                    underline: bool| {
-            let inverted = caret && block_cursor;
-            let w = cell_w * (width as f32);
-            let mut d = div()
-                .relative()
-                .flex_none()
-                .w(w)
-                .h(lh)
-                .flex()
-                .items_center()
-                .text_color(if inverted { caret_ink } else { color });
-            if inverted {
-                d = d.bg(caret_col);
-            } else if selected {
-                d = d.bg(sel_bg);
-            }
-            if underline {
-                d = d.border_b_1().border_color(fg);
-            }
-            d = d.child(text);
-            if caret && !inverted {
-                d = d.child(caret_bar());
-            }
-            d.into_any_element()
-        };
-
-        let blank = move |w: gpui::Pixels| div().flex_none().w(w).h(lh);
-
-        // The prompt's row, then the input's. Starting below the prompt leaves
-        // that row empty — the prompt shows through it — and the input begins
-        // at column 0 of the next.
-        let cols = self.terminal.term.lock().columns().max(1);
-        let (start_row, start_col) = input_start(ccol, cols);
-        let mut lines: Vec<Vec<gpui::AnyElement>> = (0..start_row).map(|_| Vec::new()).collect();
-        lines.push(vec![blank(cell_w * (start_col as f32)).into_any_element()]);
-
-        let is_multiline = chars.contains(&'\n');
-
+        // Keep the same rows for the regular text and the clipped reverse-video
+        // copy. A moving block reveals stationary glyphs underneath it.
+        type CellSpec = (gpui::Hsla, String, usize, bool, bool);
+        let blank = |width| (fg, String::new(), width, false, false);
+        let mut lines: Vec<Vec<CellSpec>> = (0..start.0).map(|_| Vec::new()).collect();
+        lines.push(vec![blank(start.1)]);
         let marked_cells = input_cells(&marked.chars().collect::<Vec<char>>());
         for c in input_cells(&chars) {
-            // The caret sits on the base of a cell, so an IME's in-flight text
-            // opens wherever the caret is drawn — anywhere inside the cell, not
-            // only on its first character.
             if has_marked && (c.start..c.end).contains(&cursor) {
                 for mc in &marked_cells {
-                    lines.last_mut().unwrap().push(cell(
-                        fg,
-                        mc.text.clone(),
-                        mc.width,
-                        false,
-                        false,
-                        true,
-                    ));
+                    lines
+                        .last_mut()
+                        .unwrap()
+                        .push((fg, mc.text.clone(), mc.width, false, true));
                 }
             }
             let i = c.start;
             if chars[i] == '\n' {
-                if selection.is_none() && !has_marked && cursor_on && cursor == i {
-                    lines.last_mut().unwrap().push(
-                        blank(cell_w)
-                            .relative()
-                            .child(caret_bar())
-                            .into_any_element(),
-                    );
-                } else if selection.is_some_and(|(s, e)| i >= s && i < e) {
-                    lines
-                        .last_mut()
-                        .unwrap()
-                        .push(blank(cell_w).bg(sel_bg).into_any_element());
+                if selection.is_some_and(|(s, e)| i >= s && i < e) {
+                    let mut cell = blank(1);
+                    cell.3 = selection.is_some_and(|(s, e)| i >= s && i < e);
+                    lines.last_mut().unwrap().push(cell);
                 }
                 lines.push(Vec::new());
                 continue;
             }
-            // A cell is one glyph, so it tints as a unit: a selection that
-            // covers any character in it — the base or a mark riding on it —
-            // covers the whole thing.
             let selected = selection.is_some_and(|(s, e)| s < c.end && c.start < e);
-            let caret = selection.is_none()
-                && !has_marked
-                && cursor_on
-                && (c.start..c.end).contains(&cursor);
             lines
                 .last_mut()
                 .unwrap()
-                .push(cell(colors[i], c.text, c.width, selected, caret, false));
+                .push((colors[i], c.text, c.width, selected, false));
         }
-
-        let ghost: Option<String> = if selection.is_none() && !has_marked && !is_multiline {
+        let ghost = if selection.is_none() && !has_marked && !chars.contains(&'\n') {
             self.ghost_suggestion()
                 .map(|full| full.chars().skip(len).collect::<String>())
-                .filter(|r| !r.is_empty())
+                .filter(|rest| !rest.is_empty())
         } else {
             None
         };
-
         if cursor == len {
             let last = lines.last_mut().unwrap();
             if has_marked {
                 for mc in &marked_cells {
-                    last.push(cell(fg, mc.text.clone(), mc.width, false, false, true));
+                    last.push((fg, mc.text.clone(), mc.width, false, true));
                 }
             } else if ghost.is_none() {
-                let mut tail = blank(cell_w).relative();
-                if selection.is_none() && cursor_on {
-                    tail = tail.child(caret_bar());
+                last.push(blank(1));
+            }
+        }
+        let mut visible_chars = chars.clone();
+        if let Some(rest) = ghost {
+            let flat: Vec<char> = rest.chars().map(one_line_char).collect();
+            visible_chars.extend_from_slice(&flat);
+            for cell in input_cells(&flat) {
+                lines
+                    .last_mut()
+                    .unwrap()
+                    .push((muted, cell.text, cell.width, false, false));
+            }
+        }
+        let (caret_row, caret_col_idx, caret_width) =
+            input_caret_cell(&visible_chars, cursor, start, cols);
+        let target = gpui::point(cell_w * caret_col_idx as f32, lh * caret_row as f32);
+        let show_cursor = selection.is_none() && !has_marked;
+        let (position, opacity) = self.cursor_frame(
+            show_cursor.then_some(target),
+            CursorLayout::Prompt {
+                cols,
+                row: crow,
+                cell_size: [cell_w.as_f32(), lh.as_f32()],
+                scroll_shift: shift,
+                start,
+            },
+            focused,
+            window,
+            cx,
+        );
+        let cursor_paint = input_caret_paint(focused, opacity > 0., cursor_style);
+
+        let ink = crate::ui::presets::caret_ink(caret_col, bg, fg);
+        // GPUI rounds authored widths to device pixels before flex layout.
+        // Repeating a rounded cell width accumulates drift from the terminal's
+        // fractional grid and can wrap a long line at a different column.
+        // Position each cell from its grid coordinate, just like the caret.
+        let mut positioned_cells = Vec::new();
+        let mut row = 0;
+        for (line_ix, cells) in lines.iter().enumerate() {
+            let mut col = 0;
+            for cell in cells {
+                let newline_selection = cell.1.is_empty() && cell.3 && line_ix + 1 < lines.len();
+                if !newline_selection && col + cell.2 > cols {
+                    row += 1;
+                    col = 0;
                 }
-                last.push(tail.into_any_element());
+                positioned_cells.push((row, col, cell));
+                col += cell.2;
+            }
+            if line_ix + 1 < lines.len() {
+                row += 1;
             }
         }
-
-        if let Some(rem) = ghost {
-            let last = lines.last_mut().unwrap();
-            let flat: Vec<char> = rem.chars().map(one_line_char).collect();
-            for (gi, gc) in input_cells(&flat).into_iter().enumerate() {
-                let caret = gi == 0 && cursor == len && cursor_on;
-                last.push(cell(muted, gc.text, gc.width, false, caret, false));
-            }
-        }
-
-        let rows = lines.into_iter().map(move |cells| {
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .w_full()
-                .min_h(lh)
-                .children(cells)
-        });
+        let render_text = |inverted: bool| {
+            div().relative().w_full().h(lh * (row + 1) as f32).children(
+                positioned_cells.iter().enumerate().map(
+                    |(_ix, (row, col, (color, text, width, selected, underline)))| {
+                        let cell = div()
+                            .absolute()
+                            .left(cell_w * *col as f32)
+                            .top(lh * *row as f32)
+                            .w(cell_w * *width as f32)
+                            .h(lh)
+                            .flex()
+                            .items_center()
+                            .text_color(if inverted {
+                                color.blend(ink.opacity(opacity))
+                            } else {
+                                *color
+                            })
+                            .when(*selected, |d| d.bg(sel_bg))
+                            .when(*underline, |d| d.border_b_1().border_color(fg))
+                            .child(text.clone());
+                        #[cfg(test)]
+                        let cell = cell.when(!inverted && _ix + 1 == positioned_cells.len(), |d| {
+                            d.debug_selector(|| "prompt-tail".into())
+                        });
+                        cell
+                    },
+                ),
+            )
+        };
+        let caret = if show_cursor {
+            cursor_paint.map(|paint| {
+                let base = div()
+                    .absolute()
+                    .left(position.x)
+                    .top(position.y)
+                    .w(cell_w * caret_width as f32)
+                    .h(lh);
+                #[cfg(test)]
+                let base = base.debug_selector(|| "prompt-caret".into());
+                match paint {
+                    InputCaretPaint::Outline => base.border_1().border_color(caret_col),
+                    InputCaretPaint::Bar => base
+                        .top(position.y + caret_top)
+                        .w(px(1.5))
+                        .h(caret_h)
+                        .bg(caret_col.opacity(opacity)),
+                    InputCaretPaint::Underline => base
+                        .top(position.y + lh - px(2.))
+                        .h(px(2.))
+                        .bg(caret_col.opacity(opacity)),
+                    InputCaretPaint::Block => base
+                        .overflow_hidden()
+                        .bg(bg.blend(caret_col.opacity(opacity)))
+                        .child(
+                            div()
+                                .absolute()
+                                .left(-position.x)
+                                .top(-position.y)
+                                .w(cell_w * cols as f32)
+                                .flex()
+                                .flex_col()
+                                .child(render_text(true)),
+                        ),
+                }
+            })
+        } else {
+            None
+        };
 
         div()
             .absolute()
             .left(px(GRID_PAD_X))
             .top(cy_top)
-            .right_4()
+            .w(cell_w * cols as f32)
             .min_h(lh)
             .flex()
             .flex_col()
@@ -7261,7 +7379,8 @@ impl TerminalView {
             .text_size(self.font_size)
             .line_height(lh)
             .text_color(fg)
-            .children(rows)
+            .child(render_text(false))
+            .children(caret)
     }
 
     fn render_completion_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
@@ -7677,7 +7796,7 @@ impl Render for TerminalView {
         let focused = self.focus_handle.is_focused(window);
         let input_bar = self
             .input_active()
-            .then(|| self.render_input_bar(focused, cx));
+            .then(|| self.render_input_bar(focused, window, cx));
         let completion_menu = self
             .input_active()
             .then(|| self.render_completion_menu(cx))
@@ -8604,6 +8723,27 @@ fn input_char_positions(
     (positions, r, c)
 }
 
+fn input_caret_cell(
+    chars: &[char],
+    cursor: usize,
+    start: (usize, usize),
+    cols: usize,
+) -> (usize, usize, usize) {
+    let (positions, row, col) = input_char_positions(chars, start, cols);
+    // A caret inside a combining sequence belongs on its base cell.
+    let base = input_cells(chars)
+        .into_iter()
+        .find(|cell| (cell.start..cell.end).contains(&cursor));
+    let (row, col, width) = base
+        .and_then(|cell| positions.get(cell.start).copied())
+        .unwrap_or((row, col, 1));
+    if col >= cols {
+        (row + 1, 0, width.max(1))
+    } else {
+        (row, col, width.max(1))
+    }
+}
+
 fn input_overlay_rows(
     chars: &[char],
     cursor: usize,
@@ -8794,6 +8934,18 @@ mod tests {
             stated_title("tty7 — process exited"),
             Some("tty7 — process exited")
         );
+    }
+
+    #[test]
+    fn input_caret_cell_tracks_wraps_newlines_and_wide_combining_cells() {
+        let caret = |text: &str, cursor, start, cols| {
+            super::input_caret_cell(&text.chars().collect::<Vec<_>>(), cursor, start, cols)
+        };
+        assert_eq!(caret("abcd", 4, (0, 0), 4), (1, 0, 1));
+        assert_eq!(caret("ab\n中x", 3, (0, 2), 8), (1, 0, 2));
+        assert_eq!(caret("ab中", 2, (0, 1), 4), (1, 0, 2));
+        assert_eq!(caret("e\u{301}x", 1, (0, 2), 8), (0, 2, 1));
+        assert_eq!(caret("", 0, (1, 0), 8), (1, 0, 1));
     }
 
     #[test]
@@ -10935,6 +11087,137 @@ mod gpui_tests {
     use crate::daemon::transport::Stream;
     use crate::terminal::remote::PtySource;
     use gpui::{Entity, TestAppContext, point};
+
+    #[gpui::test]
+    fn cursor_animation_honors_focus_visibility_layout_and_disabled_options(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, window, cx| {
+                window.activate_window();
+                view.focus_handle.focus(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |view, window, cx| {
+                assert!(window.is_window_active());
+                let layout = CursorLayout::Prompt {
+                    cols: 80,
+                    row: 0,
+                    cell_size: [10., 20.],
+                    scroll_shift: 0,
+                    start: (0, 0),
+                };
+                let origin = point(px(0.), px(0.));
+                let target = point(px(100.), px(20.));
+                cx.global_mut::<Config>().cursor_blink_style = CursorBlinkStyle::Breathe;
+                cx.global_mut::<Config>().cursor_smooth_move = true;
+                view.cursor_visible = false;
+                view.cursor_breathe_start =
+                    std::time::Instant::now() - std::time::Duration::from_millis(700);
+                let (_, alpha) = view.cursor_frame(Some(origin), layout, true, window, cx);
+                assert!(
+                    (0.15..0.3).contains(&alpha),
+                    "breathing ignores the binary blink phase"
+                );
+                let (moving, _) = view.cursor_frame(Some(target), layout, true, window, cx);
+                assert!(moving.x < target.x);
+                assert!(view.cursor_animation_pending);
+
+                cx.global_mut::<Config>().cursor_blink = false;
+                cx.global_mut::<Config>().cursor_smooth_move = false;
+                assert_eq!(
+                    view.cursor_frame(Some(target), layout, true, window, cx),
+                    (target, 1.)
+                );
+                cx.global_mut::<Config>().cursor_smooth_move = true;
+                view.cursor_frame(None, layout, true, window, cx);
+                assert_eq!(
+                    view.cursor_frame(Some(origin), layout, true, window, cx).0,
+                    origin
+                );
+                assert_eq!(
+                    view.cursor_frame(Some(target), layout, false, window, cx),
+                    (target, 1.)
+                );
+                let resized = CursorLayout::Prompt {
+                    cols: 40,
+                    row: 0,
+                    cell_size: [10., 20.],
+                    scroll_shift: 0,
+                    start: (0, 0),
+                };
+                assert_eq!(
+                    view.cursor_frame(Some(origin), resized, true, window, cx).0,
+                    origin
+                );
+                view.reset_cursor_animation();
+                assert!(view.cursor_visible);
+                assert!(view.cursor_layout.is_none());
+                cx.global_mut::<Config>().cursor_smooth_move = false;
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_long_pasted_prompt_keeps_the_caret_on_the_rendered_tail(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, size};
+        let (window, _daemon) = harness(cx);
+        let view = window.entity(cx).unwrap();
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        let cases = [
+            (0, "x".repeat(60)),
+            (0, "x".repeat(80)),
+            (0, "x".repeat(400)),
+            (11, "x".repeat(400)),
+            (60, "中e\u{301}x".repeat(60)),
+            (0, format!("{}\n{}", "x".repeat(80), "中".repeat(80))),
+        ];
+        for cell_width in [8.2, 8.6] {
+            for smooth in [false, true] {
+                for (prompt_col, text) in &cases {
+                    view.update(&mut vcx, |view, cx| {
+                        cx.global_mut::<Config>().cursor_blink = false;
+                        cx.global_mut::<Config>().cursor_smooth_move = smooth;
+                        view.set_grid_size(80, 24, px(cell_width), px(20.), 1., cx);
+                        let mut parser: alacritty_terminal::vte::ansi::Processor =
+                            alacritty_terminal::vte::ansi::Processor::new();
+                        parser.advance(
+                            &mut *view.terminal.term.lock(),
+                            format!("\x1b[1;{}H", prompt_col + 1).as_bytes(),
+                        );
+                        view.cmd.clear();
+                        view.cmd.insert_pasted(text);
+                        view.history.clear();
+                        view.reset_cursor_animation();
+                    });
+                    vcx.draw(
+                        point(px(0.), px(0.)),
+                        size(px(800.), px(1000.)),
+                        |window, cx| {
+                            let prompt =
+                                view.update(cx, |view, cx| view.render_input_bar(true, window, cx));
+                            div().size_full().relative().child(prompt)
+                        },
+                    );
+                    let caret = vcx
+                        .debug_bounds("prompt-caret")
+                        .expect("the caret was drawn");
+                    let tail = vcx
+                        .debug_bounds("prompt-tail")
+                        .expect("the empty cell after the paste was drawn");
+                    assert_eq!(
+                        caret.origin,
+                        tail.origin,
+                        "caret drift after pasting {} characters (cell width {cell_width}, smooth {smooth}, prompt column {prompt_col})",
+                        text.chars().count()
+                    );
+                }
+            }
+        }
+    }
 
     fn harness(cx: &mut TestAppContext) -> (gpui::WindowHandle<TerminalView>, Stream) {
         let pty = if cfg!(windows) {

@@ -14,9 +14,9 @@ use std::cell::{Cell, RefCell};
 use uuid::Uuid;
 
 use crate::core::config::{
-    BellMode, Config, ConfirmClose, CursorStyle, LinkFileOpen, MouseZoomModifier, NewTabPosition,
-    NotifyMode, PromptCursorStyle, TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel,
-    WindowBackdrop,
+    BellMode, Config, ConfirmClose, CursorBlinkStyle, CursorStyle, LinkFileOpen, MouseZoomModifier,
+    NewTabPosition, NotifyMode, PromptCursorStyle, TabBarPosition, UI_FONT_SIZE_DEFAULT,
+    UpdateChannel, WindowBackdrop,
 };
 use crate::core::keychain::{
     CredentialRef, CredentialStore as _, OsCredentialStore, key_account_from_contents,
@@ -425,6 +425,16 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Appearance,
+            title: SettingsCursorBlinkStyle,
+            keywords: SettingsSearchCursorBlinkStyleKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
+            title: SettingsCursorSmoothMove,
+            keywords: SettingsSearchCursorSmoothMoveKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
             title: SettingsAnsiColors,
             keywords: SettingsSearchAnsiColorsKeywords,
         },
@@ -825,6 +835,8 @@ impl SearchEntry {
             L10nKey::SettingsDimInactivePanes => "dim_inactive_panes",
             L10nKey::SettingsAutoHideTitlebarButtons => "auto_hide_titlebar_buttons",
             L10nKey::SettingsCursorBlink => "cursor_blink",
+            L10nKey::SettingsCursorBlinkStyle => "cursor_blink_style",
+            L10nKey::SettingsCursorSmoothMove => "cursor_smooth_move",
             L10nKey::SettingsCursorShape => "cursor_style",
             L10nKey::SettingsPromptCursorShape => "prompt_cursor_style",
             L10nKey::SettingsScrollback => "scrollback_limit",
@@ -923,6 +935,8 @@ impl SearchEntry {
             L10nKey::SettingsCursorShape => t(L10nKey::SettingsCursorShapeDesc),
             L10nKey::SettingsPromptCursorShape => t(L10nKey::SettingsPromptCursorShapeDesc),
             L10nKey::SettingsCursorBlink => t(L10nKey::SettingsCursorBlinkDesc),
+            L10nKey::SettingsCursorBlinkStyle => t(L10nKey::SettingsCursorBlinkStyleDesc),
+            L10nKey::SettingsCursorSmoothMove => t(L10nKey::SettingsCursorSmoothMoveDesc),
             L10nKey::SettingsBackgroundImage => t(L10nKey::SettingsBackgroundImageDesc),
             L10nKey::SettingsImageOpacity => t(L10nKey::SettingsImageOpacityDesc),
             L10nKey::SettingsProgram => t(L10nKey::SettingsProgramDesc),
@@ -994,6 +1008,12 @@ impl SearchEntry {
                 cfg.auto_hide_titlebar_buttons != defaults.auto_hide_titlebar_buttons
             }
             L10nKey::SettingsCursorBlink => cfg.cursor_blink != defaults.cursor_blink,
+            L10nKey::SettingsCursorBlinkStyle => {
+                cfg.cursor_blink_style != defaults.cursor_blink_style
+            }
+            L10nKey::SettingsCursorSmoothMove => {
+                cfg.cursor_smooth_move != defaults.cursor_smooth_move
+            }
             L10nKey::SettingsCursorShape => cfg.cursor_style != defaults.cursor_style,
             L10nKey::SettingsPromptCursorShape => {
                 cfg.prompt_cursor_style != defaults.prompt_cursor_style

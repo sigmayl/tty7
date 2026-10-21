@@ -276,8 +276,20 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCursorShapeDesc => "终端光标的绘制方式。",
         L10nKey::SettingsPromptCursorShape => "提示符光标形状",
         L10nKey::SettingsPromptCursorShapeDesc => "shell 提示符处的光标。",
+        L10nKey::SettingsCursorBlinkStyle => "闪烁方式",
+        L10nKey::SettingsCursorBlinkStyleDesc => "开启光标闪烁时，选择闪烁或呼吸效果。",
+        L10nKey::CursorBlinkStyleBlink => "闪烁",
+        L10nKey::CursorBlinkStyleBreathe => "呼吸",
+        L10nKey::SettingsCursorSmoothMove => "光标平滑移动",
+        L10nKey::SettingsCursorSmoothMoveDesc => "光标在字符位置之间移动时显示平滑动画。",
+        L10nKey::SettingsSearchCursorBlinkStyleKeywords => {
+            "光标 闪烁 呼吸 动画 blink breathe pulse"
+        }
+        L10nKey::SettingsSearchCursorSmoothMoveKeywords => {
+            "光标 平滑 移动 动画 cursor smooth movement"
+        }
         L10nKey::SettingsCursorBlink => "光标闪烁",
-        L10nKey::SettingsCursorBlinkDesc => "终端获得焦点时让光标闪烁。",
+        L10nKey::SettingsCursorBlinkDesc => "终端获得焦点时启用光标闪烁或呼吸效果。",
         L10nKey::SettingsLanguage => "语言",
         L10nKey::SettingsLanguageDesc => "选择 tty7 界面使用的语言。",
         L10nKey::SettingsLanguageEnglish => "English",

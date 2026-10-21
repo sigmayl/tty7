@@ -289,7 +289,8 @@ updater = ["dep:async_zip"]
 # ---- Standalone workspace mirroring gpui-component's pins so the git/source
 # ---- caches are shared and versions stay aligned. ----
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "vendor/gpui_wgpu"]
+exclude = ["vendor/gpui"]
 # The root `tty7` package is a member implicitly; naming every crate here is
 # what makes a bare `cargo build` / `cargo test` at the root cover the whole
 # workspace, which is how CI invokes them.
@@ -467,8 +468,12 @@ codegen-units = 1
 # When bumping the upstream rev: rebase the fork's `tty7` branch onto the new rev,
 # push, then update the `rev` pins above — the branch here follows automatically.
 [patch."https://github.com/zed-industries/zed"]
-gpui = { git = "https://github.com/l0ng-ai/zed", branch = "tty7" }
+gpui = { path = "vendor/gpui" }
 gpui_platform = { git = "https://github.com/l0ng-ai/zed", branch = "tty7" }
 gpui_macros = { git = "https://github.com/l0ng-ai/zed", branch = "tty7" }
 gpui_web = { git = "https://github.com/l0ng-ai/zed", branch = "tty7" }
 reqwest_client = { git = "https://github.com/l0ng-ai/zed", branch = "tty7" }
+
+[patch."https://github.com/l0ng-ai/zed"]
+gpui = { path = "vendor/gpui" }
+gpui_wgpu = { path = "vendor/gpui_wgpu" }
